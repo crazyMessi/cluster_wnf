@@ -26,14 +26,14 @@ def estimate_normals(pcd, neighbors=30):
     pcd.orient_normals_consistent_tangent_plane(10)
     return np.asarray(pcd.normals)
 
-def create_uniform_grid(resolution):
+def create_uniform_grid(resolution,bbox=np.array([[-1,1],[-1,1],[-1,1]])):
     """
     创建均匀采样的 3D 网格采样点
     """
-    x = np.linspace(0, 1, resolution)
-    y = np.linspace(0, 1, resolution)
-    z = np.linspace(0, 1, resolution)
-    zz, yy, xx = np.meshgrid(x, y, z, indexing='ij')
+    x = np.linspace(bbox[0,0], bbox[0,1], resolution)
+    y = np.linspace(bbox[1,0], bbox[1,1], resolution)
+    z = np.linspace(bbox[2,0], bbox[2,1], resolution)
+    xx, yy, zz = np.meshgrid(x, y, z, indexing='ij')
     points = np.stack([xx.flatten(), yy.flatten(), zz.flatten()], axis=1)
     grid_shape = (resolution, resolution, resolution)
     return points, grid_shape
@@ -59,19 +59,22 @@ def segment_winding_field(wn_field: np.ndarray, n_segments: int = 100, compactne
     segments_flat = segments.flatten()
     wn_flat = wn_field.flatten()
     segments_sum = {}
+    segments_size = {}
+    segments_mean = {} 
     for i in range(segments_flat.max() + 1):
         mask = segments_flat == i
-        wn_sum = np.sum(wn_flat[mask])
-        segments_sum[i] = wn_sum
+        wn_i = wn_flat[mask]
+        segments_sum[i] = np.sum(wn_i)
+        segments_size[i] = len(wn_i)
+        segments_mean[i] = np.mean(wn_i)    
     # 根据 wn_sum 对 labels 进行排序
     segments_sum = sorted(segments_sum.items(), key=lambda x: x[1], reverse=True)
     new_segments = np.zeros_like(segments)
     for i, (label, _) in enumerate(segments_sum):
         new_segments[segments == label] = i
     new_segments = new_segments.reshape(wn_field.shape)
-    return new_segments
+    return new_segments,segments_sum,segments_size,segments_mean
 
-# 2. 使用类似 compute_G_fast 的方法构造超体素网络
 def compute_supervoxel_network(segmented_grid, wn_field):
     """
     构造超体素网络的邻接矩阵
@@ -136,6 +139,8 @@ def spectral_bisect_network(G):
     sp_G = G.copy()
     # 非零部分取倒数
     sp_G[G!=0] = 1/G[G!=0]
+    sp_G = np.exp(sp_G)
+    # sp_G = np.exp(-1 * (sp_G ** 2))
     clusters = spectral.fit_predict(sp_G)
     return clusters
 
@@ -151,11 +156,18 @@ def field_to_clusters(field_data: np.ndarray, n_segments: int = 100, compactness
     Returns:
         (N, N, N) array - 二分聚类结果，每个体素的值为0或1
     """
+    # field_data = np.clip(field_data, -1, 1)
+    
     # 1. 超体素分割
-    segmented_grid = segment_winding_field(field_data, n_segments, compactness)
+    segmented_grid,segments_sum,segments_size,segments_mean = segment_winding_field(field_data, n_segments, compactness)
     
     # 2. 构建超体素网络
     G = compute_supervoxel_network(segmented_grid, field_data)
+    # G = np.zeros((len(segments_sum),len(segments_sum)))
+    # for i in range(len(segments_sum)):
+    #     for j in range(len(segments_sum)):
+    #         G[i,j] = np.abs(segments_mean[i] - segments_mean[j])
+    
     
     # 3. 谱聚类
     clusters = spectral_bisect_network(G)
@@ -164,7 +176,9 @@ def field_to_clusters(field_data: np.ndarray, n_segments: int = 100, compactness
     cluster_grid = np.zeros_like(field_data)
     for i in range(len(clusters)):
         cluster_grid[segmented_grid == i] = clusters[i]
-    return cluster_grid
+    return cluster_grid,segmented_grid,G,clusters
+
+
 
 def field_to_clusters_with_vis(field_data: np.ndarray, n_segments: int = 100, 
                              compactness: float = 0.1, save_path: str = None) -> tuple:
@@ -184,23 +198,8 @@ def field_to_clusters_with_vis(field_data: np.ndarray, n_segments: int = 100,
             - (K, K) array - 超体素网络邻接矩阵
             - (K,) array - 聚类标签
     """
-    # 1. 超体素分割
-    print("Step 1: Supervoxel segmentation...")
-    segmented_grid = segment_winding_field(field_data, n_segments, compactness)
     
-    # 2. 构建超体素网络
-    print("Step 2: Building supervoxel network...")
-    G = compute_supervoxel_network(segmented_grid, field_data)
-    
-    # 3. 谱聚类
-    print("Step 3: Spectral clustering...")
-    clusters = spectral_bisect_network(G)
-    
-    # 4. 将聚类结果映射回体素网格
-    print("Step 4: Mapping clusters back to grid...")
-    cluster_grid = np.zeros_like(field_data)
-    for i in range(len(clusters)):
-        cluster_grid[segmented_grid == i] = clusters[i]
+    cluster_grid,segmented_grid,G,clusters = field_to_clusters(field_data, n_segments, compactness)
     
     # 5. 可视化（如果需要）
     if save_path is not None:

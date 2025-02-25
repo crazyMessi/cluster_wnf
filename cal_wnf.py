@@ -159,6 +159,7 @@ class WNF:
         self.epsilon = epsilon
         self.normals = None
         self.point_areas = None
+        self.miu = None
         
         # 计算点面积
         self._compute_point_areas()
@@ -169,29 +170,6 @@ class WNF:
         A = compute_points_area_by_knn(points_np, knn=k)
         self.point_areas = torch.from_numpy(A).float().to(self.device)
     
-    def init_normal(self, k=30):
-        """
-        使用 PCA 初始化法向量
-        
-        Args:
-            k: int - 计算法向量时使用的近邻点数
-        """
-        points_np = self.points.cpu().numpy()
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points_np)
-        
-        # 估计法向量
-        pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamKNN(knn=k)
-        )
-        pcd.orient_normals_consistent_tangent_plane(k)
-        
-        # 更新法向量
-        normals_np = np.asarray(pcd.normals)
-        self.normals = torch.from_numpy(normals_np).float().to(self.device)
-        
-        return self
-    
     def update_normal(self, normals):
         """
         更新法向量
@@ -201,54 +179,147 @@ class WNF:
         """
         if not isinstance(normals, torch.Tensor):
             normals = torch.from_numpy(normals).float()
+            normals = normals.to(self.device)
+        # 检查法向量是否单位化
+        norms = torch.norm(normals, dim=1)
+        assert(sum(norms.isnan()) == 0), "法向量中存在nan"
+        # 零向量
+        zero_norms = torch.sum(norms == 0)
+        if zero_norms > 0:
+            print("There is %d zero normals, use original normals" % zero_norms)
+            # 随机选择一个点作为法向量
+            assert self.normals is not None, "没有初始法向量"
+            normals[norms == 0] = self.normals[norms == 0]  
+            norms[norms == 0] = torch.norm(normals[norms == 0], dim=1)
+        if torch.any(norms < 0.999) or torch.any(norms > 1.001):
+            count = torch.sum(norms < 0.999) + torch.sum(norms > 1.001)
+            count = count.item()
+            print("There is %d normals not unitized" % count)
+            # 单位化
+            normals = normals / norms.unsqueeze(1)            
         
         assert normals.shape == self.points.shape, "法向量形状必须与点云相同"
-        
         self.normals = normals.to(self.device)
+        self.miu = self.point_areas[:,None] * self.normals
         return self
-    
+
     def query_wn(self, query_points, batch_size=10000):
         """
         查询指定位置的 winding number
         
         Args:
-            query_points: (M, 3) array/tensor - 查询点坐标
-            batch_size: int - 批处理大小
-            
-        Returns:
-            (M,) array/tensor - 查询点的 winding number，
-            返回类型与输入类型相同
+            query_points: (M, 3) array/tensor - 查询点坐标  
         """
-        assert self.normals is not None, "请先初始化或更新法向量"
+        assert(self.normals.isnan().any() == 0), "法向量中存在nan"
+        res = torch.zeros(query_points.shape[0], device=self.device)
+        for i in range(0, query_points.shape[0], batch_size):
+            end_idx = min(i + batch_size, query_points.shape[0])
+            res[i:end_idx] = self._query_wn(query_points[i:end_idx])
+        assert(sum(res.isnan()) == 0), "winding number中存在nan"
+        return res
         
-        fromnp = isinstance(query_points, np.ndarray)
-        if fromnp:
+    def _query_wn(self, query_points):
+        if not isinstance(query_points, torch.Tensor):
             query_points = torch.from_numpy(query_points).float()
-        if query_points.device != self.device:
-            query_points = query_points.to(self.device)
-        
-        res = compute_winding_number_torch(
-            query_points, 
-            self.points, 
-            self.normals, 
-            self.point_areas,
-            self.epsilon,
-            batch_size
-        )
-        
-        return res.cpu().numpy() if fromnp else res        
-    
-    def __call__(self, query_points, batch_size=10000):
+        query_points = query_points.to(self.device)
+        return compute_winding_number_torch(query_points, self.points, self.normals, self.point_areas, self.epsilon, 10000)
         """
-        使类实例可调用，等同于 query_wn
-        """
-        return self.query_wn(query_points, batch_size)
+        计算查询点的 winding number (不分批)
 
-    def igl_wn(self, points, normals, query_points):
+        Args:
+            query_points: (N, 3) tensor/array - 查询点
+
+        Returns:
+            (N,) tensor - 查询点的 winding number
+        """
+        # 确保输入是 tensor 且在正确的设备上
+        if not isinstance(query_points, torch.Tensor):
+            query_points = torch.from_numpy(query_points).float()
+        query_points = query_points.to(self.device)
+
+        # 计算向量差 (y - x_j)
+        vectors = query_points.unsqueeze(1) - self.points.unsqueeze(0)  # (N, M, 3)
+        
+        # 计算距离
+        distances = torch.norm(vectors, dim=2)  # (N, M)
+        distances_cubed = (distances ** 3)  # (N, M, 1)
+        distances_cubed = torch.clamp(distances_cubed, min=self.epsilon)
+        
+        # 单位化向量
+        vectors = vectors / (distances.unsqueeze(2) + 1e-8)
+        
+        # 计算点积
+        dot_products = torch.sum(vectors * self.miu.unsqueeze(0), dim=2) # (N, M)
+        solid_angles = dot_products / (4.0 * np.pi) * distances_cubed 
+    
+        # 对每个查询点求和
+        winding_numbers = torch.sum(solid_angles, dim=1)  # (N,)
+        
+        return winding_numbers
+
+    def compute_gradient(self, query_points):
+        """
+        计算查询点处的梯度 (不分批)
+
+        Args:
+            query_points: (N, 3) tensor/array - 查询点
+
+        Returns:
+            (N, 3) tensor - 每个查询点处的梯度
+        """
+        # 确保输入是 tensor 且在正确的设备上
+        if not isinstance(query_points, torch.Tensor):
+            query_points = torch.from_numpy(query_points).float()
+        query_points = query_points.to(self.device)
+
+        # 计算向量差 (y - x_j)
+        diff = query_points.unsqueeze(1) - self.points.unsqueeze(0)  # (N, M, 3)
+        
+        # 计算距离的幂
+        dist = torch.norm(diff, dim=2)  # (N, M)
+        dist3 = torch.clamp(dist ** 3, min=self.epsilon)  # (N, M)
+        dist5 = torch.clamp(dist ** 5, min=self.epsilon)  # (N, M)
+        
+        # 计算梯度的两个部分
+        coef = 1.0 / (4.0 * np.pi)
+        
+        # 第一部分: μ_j / ||y - x_j||^3
+        grad_part1 = coef * (self.miu.unsqueeze(0) / dist3.unsqueeze(2))  # (N, M, 3)
+        
+        # 第二部分: -3((y - x_j)·μ_j)(y - x_j) / ||y - x_j||^5
+        dot_mu = torch.sum(diff * self.miu.unsqueeze(0), dim=2)  # (N, M)
+        grad_part2 = -3.0 * coef * (dot_mu.unsqueeze(2) * diff) / dist5.unsqueeze(2)  # (N, M, 3)
+        
+        # 合并两部分并求和
+        gradients = torch.sum(grad_part1 + grad_part2, dim=1)  # (N, 3)
+        
+        return gradients
+
+    def __call__(self, query_points, compute_gradient=False):
+        """
+        计算查询点的 winding number，可选是否同时计算梯度
+
+        Args:
+            query_points: (N, 3) tensor/array - 查询点
+            compute_gradient: bool - 是否计算梯度
+
+        Returns:
+            如果 compute_gradient 为 False:
+                (N,) tensor - winding numbers
+            否则:
+                ((N,) tensor, (N, 3) tensor) - (winding numbers, gradients)
+        """
+        wn = self.compute_wn(query_points)
+        if compute_gradient:
+            grad = self.compute_gradient(query_points)
+            return wn, grad
+        return wn
+
+    def igl_wn(self, query_points):
         """
         使用 igl 计算 winding number
         """
-        return fast_winding_number(self.points, self.normals, query_points)
+        return fast_winding_number(self.points.cpu().numpy(), self.normals.cpu().numpy(), query_points)
 
 
 # 使用示例
