@@ -42,6 +42,15 @@ def visualize_partition(segmented_grid, partition_labels):
     new_grid = f(segmented_grid)
     return new_grid
 
+import pymeshlab
+
+def pymeshlab_normal_estimate(points,k):
+    ms = pymeshlab.MeshSet()
+    ms.add_mesh(pymeshlab.Mesh(points))
+    ms.compute_normal_for_point_clouds(k=k)
+    normals = ms.current_mesh().vertex_normal_matrix()
+    return np.asarray(normals)
+
 def PCA_normal_estimate(points):
     """
     使用PCA估计点云的法向量
@@ -54,9 +63,19 @@ def PCA_normal_estimate(points):
     pcd.orient_normals_consistent_tangent_plane(1)
     return np.asarray(pcd.normals)
 
+def random_normal_estimate(points):
+    """
+    随机估计点云的法向量
+    """
+    normals = np.random.rand(points.shape[0],3)
+    while(np.any(np.linalg.norm(normals,axis=1)<0.01)):
+        normals = np.random.rand(points.shape[0],3)
+    normals = normals / np.linalg.norm(normals,axis=1,keepdims=True)
+    return normals
+
 
 # 可视化示例代码
-def plot_partition(partition_grid, save_path="./temp/partition.png",slice_idx=None):
+def plot_partition(partition_grid, save_path="./temp/partition.png",slice_idx=None,bbox=None,points=None,vis=False):
     """
     可视化二分结果
     参数:
@@ -77,25 +96,47 @@ def plot_partition(partition_grid, save_path="./temp/partition.png",slice_idx=No
         y_slice = slice_idx[1]
         x_slice = slice_idx[2]
     
+    def scatter_points(axis,points,bbox,ax,slice_idx):
+        step = (bbox[axis,1]-bbox[axis,0])/(partition_grid.shape[axis]-1)
+        _range = (bbox[axis,0] + step * slice_idx,bbox[axis,0] + step * (slice_idx+1))
+        points_in_slice = points[(points[:,axis] >= _range[0]) & (points[:,axis] <= _range[1])]
+        x = (axis + 1) % 3
+        y = (axis + 2) % 3
+        if x < y:
+            x,y = y,x
+        # 映射到0~resolution-1
+        points_in_slice[:,x] = (points_in_slice[:,x] - bbox[x,0]) / (bbox[x,1] - bbox[x,0]) * (partition_grid.shape[x]-1)
+        points_in_slice[:,y] = (points_in_slice[:,y] - bbox[y,0]) / (bbox[y,1] - bbox[y,0]) * (partition_grid.shape[y]-1)
+        ax.scatter(points_in_slice[:,x],points_in_slice[:,y],c='r',s=1)
+    
+    
     # XY平面
     ax1 = fig.add_subplot(131)
-    ax1.imshow(partition_grid[:, :, z_slice], cmap='coolwarm')
+    if points is not None and bbox is not None:
+        scatter_points(2,points,bbox,ax1,z_slice)
+    ax1.imshow(partition_grid[:, :, z_slice], cmap='coolwarm',origin='lower')
     ax1.set_title('XY Plane (z=%d)' % z_slice)
-    
+
     # XZ平面
     ax2 = fig.add_subplot(132)
-    ax2.imshow(partition_grid[:, y_slice, :], cmap='coolwarm')
+    ax2.imshow(partition_grid[:, y_slice, :], cmap='coolwarm',origin='lower')
     ax2.set_title('XZ Plane (y=%d)' % y_slice)
+    if points is not None and bbox is not None:
+        scatter_points(1,points,bbox,ax2,y_slice)
     
     # YZ平面
     ax3 = fig.add_subplot(133)
-    ax3.imshow(partition_grid[x_slice, :, :], cmap='coolwarm')
+    ax3.imshow(partition_grid[x_slice, :, :], cmap='coolwarm',origin='lower')
     ax3.set_title('YZ Plane (x=%d)' % x_slice)
-    
+    if points is not None and bbox is not None:
+        scatter_points(0,points,bbox,ax3,x_slice)
+
     plt.tight_layout()
     
     plt.savefig(save_path)
-    plt.show()
+    if vis:
+        plt.show()
+    plt.close()
 
 import os
 
@@ -197,7 +238,7 @@ def poission_rec(input_file_name,output_file_name,inv=True,clean_k=30,btype=3,de
     return
 
 
-def extract_surface_from_scalar_field(scalar_field, level, resolution,bbox=np.array([[-1,1],[-1,1],[-1,1]])):
+def extract_surface_from_scalar_field(scalar_field, level, resolution,bbox=np.array([[-1,1],[-1,1],[-1,1]]),mask=None):
     """
     从3D标量场中提取等值面
     参数:
@@ -217,7 +258,8 @@ def extract_surface_from_scalar_field(scalar_field, level, resolution,bbox=np.ar
             scalar_field,
             level=level,
             spacing=spacing,
-            allow_degenerate=False
+            allow_degenerate=False,
+            mask=mask
         )
         verts = verts + [bbox[0,0],bbox[1,0],bbox[2,0]]
         return verts, faces
@@ -226,4 +268,60 @@ def extract_surface_from_scalar_field(scalar_field, level, resolution,bbox=np.ar
         print(f"Error in marching cubes: {str(e)}")
         return None, None
 
+def create_uniform_grid(resolution,bbox=np.array([[-1,1],[-1,1],[-1,1]])):
+    """
+    创建均匀采样的 3D 网格采样点
+    @return points: (N, 3) array - 网格采样点
+    @return grid_shape: (3,) tuple - 网格形状
+    """
+    x = np.linspace(bbox[0,0], bbox[0,1], resolution)
+    y = np.linspace(bbox[1,0], bbox[1,1], resolution)
+    z = np.linspace(bbox[2,0], bbox[2,1], resolution)
+    xx, yy, zz = np.meshgrid(x, y, z, indexing='ij')
+    points = np.stack([xx.flatten(), yy.flatten(), zz.flatten()], axis=1)
+    grid_shape = (resolution, resolution, resolution)
+    return points, grid_shape
 
+# def allocate_points_to_grid(points,grid):
+#     '''
+#     将点云分配到网格中
+#     @param points: (N, 3) array - 点云
+#     @param grid: (M, 3) array - 网格位置
+#     @return : (N,) array - 点云在网格中的索引
+#     '''
+#     kdtree = cKDTree(grid)
+#     _,idx = kdtree.query(points,k=1)
+#     return idx
+
+def create_mask_by_k(tomask,source_points,k):
+    mask = np.zeros(tomask.shape[0],dtype=np.bool)
+    kdtree = cKDTree(tomask)
+    _,idx = kdtree.query(source_points,k=k,workers=-1)
+    idx = idx.flatten()
+    mask[idx] = True
+    return mask
+    
+def clean_bad_data(points,normals):
+    mask = np.linalg.norm(normals,axis=1) > 0.01
+    print("There is %d points removed" % (len(points) - np.sum(mask)))
+    points = points[mask]
+    normals = normals[mask]
+    return points,normals
+
+def fun0(G):
+    G[G!=0] = 1/G[G!=0]
+    return G
+
+def fun1(G):
+    G[G!=0] = 1/G[G!=0]
+    G = np.clip(G,0,15)
+    G = np.exp(G)
+    return G
+
+def Gaussian(G,sigma=1):
+    zero_mask = G!=0
+    # 计算高斯权重
+    G[zero_mask] = np.exp(-G[zero_mask]**2/(2*sigma**2))
+    G[zero_mask] += 1e-10
+    return G
+    

@@ -7,6 +7,7 @@ import torch
 import time
 import matplotlib.pyplot as plt
 from sklearn.neighbors import NearestNeighbors
+import tools
 
 def normalize_points(points):
     """将点云归一化到单位立方体 [0,1]^3 中"""
@@ -186,10 +187,12 @@ class WNF:
         # 零向量
         zero_norms = torch.sum(norms == 0)
         if zero_norms > 0:
-            print("There is %d zero normals, use original normals" % zero_norms)
+            print("There is %d zero normals, use random normals" % zero_norms)
             # 随机选择一个点作为法向量
             assert self.normals is not None, "没有初始法向量"
-            normals[norms == 0] = self.normals[norms == 0]  
+            random_normals = tools.random_normal_estimate(self.points.cpu().numpy())
+            random_normals = torch.from_numpy(random_normals).float().to(self.device)
+            normals[norms == 0] = random_normals[norms == 0]
             norms[norms == 0] = torch.norm(normals[norms == 0], dim=1)
         if torch.any(norms < 0.999) or torch.any(norms > 1.001):
             count = torch.sum(norms < 0.999) + torch.sum(norms > 1.001)

@@ -55,6 +55,14 @@ def view_data_and_mesh(labels_out,verts,faces,bbox):
     ps.register_surface_mesh("sample mesh", verts, faces)
     ps.show()
 
+def view_data_and_points(labels_out,points,bbox):
+    bound_low = [bbox[0,0],bbox[1,0],bbox[2,0]]
+    bound_high = [bbox[0,1],bbox[1,1],bbox[2,1]]
+    ps.init()
+    ps_grid = ps.register_volume_grid("sample grid", labels_out.shape, bound_low, bound_high)
+    ps_grid.add_scalar_quantity("node scalar1", labels_out, defined_on='nodes', enabled=True)
+    ps.register_point_cloud("sample points", points)
+    ps.show()
 
 if __name__ == "__main__":
     labels_out = read_grid_file("./data/zcurve_wnf.bin")
