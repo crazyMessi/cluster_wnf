@@ -325,3 +325,19 @@ def Gaussian(G,sigma=1):
     G[zero_mask] += 1e-10
     return G
     
+
+def get_kernel_correspond_to_connectivity(connectivity):
+    kernel = np.zeros((3,3,3),dtype=np.uint8)
+    if connectivity >= 6:
+        kernel[1,1,:] = 1
+        kernel[:,1,1] = 1
+        kernel[1,:,1] = 1
+    if connectivity >= 18:
+        kernel[1,:,:] = 1
+        kernel[:,1,:] = 1
+        kernel[:,:,1] = 1
+    if connectivity >= 26:
+        kernel[0,:,:] = 1
+        kernel[:,0,:] = 1
+        kernel[:,:,0] = 1
+    return kernel

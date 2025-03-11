@@ -85,10 +85,10 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
         maskk = (distance * resolution * 2) ** 3
         maskk = int(maskk)
         mask = tools.create_mask_by_k(grid,normalized_points,maskk)
-        smask = tools.create_mask_by_k(grid,normalized_points,maskk-1)
+        # smask = tools.create_mask_by_k(grid,normalized_points,maskk-1)
     else:
         mask = np.ones(grid.shape[0],dtype=bool)
-        smask = np.ones(grid.shape[0],dtype=bool)
+        # smask = np.ones(grid.shape[0],dtype=bool)
     
     # 使用cc3d判断mask是否联通
     labels = cc3d.connected_components(mask.reshape(grid_shape))
@@ -176,7 +176,7 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
         
         # 提取面片
         # 
-        verts, faces = tools.extract_surface_from_scalar_field(cluster_grid, 0.5, resolution,bbox,mask=smask.reshape(grid_shape))
+        verts, faces = tools.extract_surface_from_scalar_field(cluster_grid, 0.5, resolution,bbox,mask=mask.reshape(grid_shape))
         # verts, faces = tools.clean_mesh2(verts,faces,normalized_points)
         
         # 更新法向量
