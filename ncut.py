@@ -42,6 +42,8 @@ def my_dust(labels,threshold):
 def cc3d_segmentatino(wn_field,level_count=10,min_size=100):
     """
     使用 cc3d 对 winding number 场进行分割
+    @param level_count: 分割的层数
+    @param min_size: 最小连通域大小
     """
     import cc3d
     from scipy import ndimage

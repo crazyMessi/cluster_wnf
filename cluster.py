@@ -1,8 +1,76 @@
 import numpy as np
 from skimage import morphology
 import cc3d
+import optimization
+import ncut
 
-def morphological_subdivision_3d(components, kernel, iterations=1):
+
+    # # 谱聚类
+    # assert ncut.is_connected(G), "G is not connected"
+    # fsegments = segmented_grid[mask]
+    # mgrid = grid[mask]
+    # pos = np.array([np.mean(mgrid[fsegments==i],axis=0) for i in range(len(G))])
+    # # G,nid2oid = ncut.get_subgraph(G,sp_idx)
+    # spectral = SpectralClustering(n_clusters=2, affinity='precomputed', assign_labels='kmeans', random_state=0) 
+    # sp_G = G.copy()
+    # sp_G[G_pointcount!=0] = G[G_pointcount!=0] * (G_pointcount[G_pointcount!=0])
+    # sp_G = tools.Gaussian(sp_G,sigma=1)
+    
+    # assert ncut.is_connected(sp_G), "sp_G is not connected"
+    # o3dmesh = ncut.weighted_graph_2_mesh(sp_G,pos,vis=False)
+    # o3d.io.write_triangle_mesh("temp/iter_{}_topology.ply".format(iteration), o3dmesh)
+    # clusters = spectral.fit_predict(sp_G)
+    # segmented_grid = np.reshape(segmented_grid,grid_shape)
+    # cluster_grid = np.zeros_like(segmented_grid)
+    # cluster_grid[~mask.reshape(grid_shape)] = -1
+    # for j in range(len(clusters)):
+    #     cluster_grid[segmented_grid == sp_idx[j]] = clusters[j]
+    # view.view_data_and_mesh(cluster_grid,gt_verts,gt_faces,bbox)
+    # G1,_ = ncut.get_subgraph(sp_G,sp_idx[clusters==1])
+    # o3dmesh = ncut.vis_weighted_graph(G1,pos[clusters==1])
+    # o3d.io.write_triangle_mesh("temp/iter_{}_topology_1.ply".format(iteration), o3dmesh)
+    # G2,_ = ncut.get_subgraph(sp_G,sp_idx[clusters==0])
+    # o3dmesh = ncut.vis_weighted_graph(G2,pos[clusters==0])
+    # o3d.io.write_triangle_mesh("temp/iter_{}_topology_0.ply".format(iteration), o3dmesh)
+    
+
+def max_cut(labels,wnf_field,points_count,mask):
+    sp_labels = np.unique(labels[mask])
+    G,G_pointcount = ncut.compute_supervoxel_network(labels,wnf_field,points_count,mask=mask)
+    labels[mask], labels_mean = ncut.reallcate_labels_by_mean_val(labels[mask],wnf_field[mask])
+    A,B = optimization.getAB2(labels_mean)
+    has_edge = G != 0
+    A[~has_edge] = 0
+    B[~has_edge] = 0
+    A *= 1+G_pointcount
+    B /= 1+G_pointcount
+    x = optimization.MIQP(A,B,has_edge)
+    res_labels = np.zeros_like(labels)
+    res_labels[~mask] = -1
+    for i in range(len(x)):
+        if x[i] == 0:
+            continue
+        res_labels[labels == sp_labels[i]] = x[i]
+    return res_labels
+    
+    
+# def reallocate_labels(labels,connectivity=26):
+#     '''
+#     重新分配mask内的labels
+#     对于-1 保持原样
+#     每个联通分量重新分配一个唯一的label
+#     '''    
+#     components = cc3d.connected_components(labels,connectivity=connectivity)
+#     unique_labels = np.unique(components)
+#     new_idx = 0
+#     for label in unique_labels:
+#         if label == -1:
+#             continue
+#         labels[components == label] = new_idx
+#         new_idx += 1
+#     return labels
+
+def controlled_erosion_3d(components, kernel, iterations=1):
     """
     对3D标签图像进行形态学细分，保持原有边界的同时对各个区域进行过分割
     
@@ -68,31 +136,30 @@ def controlled_dilation_3d(components, original_labels, kernel):
     # 获取需要填充的区域（原始非背景区域中还未被标记的部分）
     unfilled_mask = (original_labels != -1) & (dilated_components == -1)
     
+    
+    # 对每个现有的标签进行一次膨胀
+    labels_to_process = np.unique(dilated_components)
+    labels_to_process = labels_to_process[labels_to_process != -1]
+    
+    
     # 当还有未填充的区域时继续膨胀
     while np.any(unfilled_mask):
-        # 对每个现有的标签进行一次膨胀
-        labels_to_process = np.unique(dilated_components)
-        labels_to_process = labels_to_process[labels_to_process != -1]
-        
-        # 创建临时数组来存储这一轮的膨胀结果
+    # 创建临时数组来存储这一轮的膨胀结果
         temp_dilated = dilated_components.copy()
-        
+    
         for label in labels_to_process:
             # 获取当前标签的掩码
             current_mask = dilated_components == label
             # 进行一次膨胀
             dilated_mask = morphology.binary_dilation(current_mask, kernel)
-            # 限制在原始标签区域内
-            valid_dilation = dilated_mask & (original_labels != -1)
-            # 只在未填充的区域进行更新
-            update_mask = valid_dilation & (temp_dilated == -1)
-            temp_dilated[update_mask] = label
+            # 限制在原始标签区域内 且temp_dilated中为-1的区域
+            valid_dilation = dilated_mask & (original_labels != -1) & (temp_dilated == -1)
+            temp_dilated[valid_dilation] = label
         
         # 更新结果
         dilated_components = temp_dilated
         # 更新未填充掩码
         unfilled_mask = (original_labels != -1) & (dilated_components == -1)
-    
     return dilated_components
 
 def morphological_subdivision_with_dilation_3d(components, kernel, iterations=1):
@@ -108,14 +175,14 @@ def morphological_subdivision_with_dilation_3d(components, kernel, iterations=1)
     final_components: 最终的标签图像，每个连通分量都有唯一的标签
     """
     # 先进行腐蚀和分割
-    eroded = morphological_subdivision_3d(components, kernel, iterations)
+    eroded = controlled_erosion_3d(components, kernel, iterations)
     
     # 然后在原始区域内进行受控膨胀
     dilated = controlled_dilation_3d(eroded, components, kernel)
     
     # 最后确保每个连通分量都有唯一的标签
     final_components = np.zeros_like(components) - 1
-    new_idx = 1
+    new_idx = 1 
     
     # 获取所有非背景标签
     unique_labels = np.unique(dilated)

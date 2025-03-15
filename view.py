@@ -64,8 +64,22 @@ def view_data_and_points(labels_out,points,bbox):
     ps.register_point_cloud("sample points", points)
     ps.show()
 
-if __name__ == "__main__":
-    labels_out = read_grid_file("./data/zcurve_wnf.bin")
-    view_data(labels_out)
 
+
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+    from gooey import Gooey, GooeyParser
+
+    @Gooey(program_name="View WNF Field", default_size=(800, 600))
+    def main():
+        parser = GooeyParser(description="View WNF Field")
+        parser.add_argument("Input", widget="FileChooser", help="Input WNF Field File")
+        args = parser.parse_args()
+        if ".bin" in args.Input:
+            labels_out = read_grid_file(args.Input)
+        elif ".npy" in args.Input:
+            labels_out = np.load(args.Input)
+        view_data(labels_out)
+        
+    main()
 

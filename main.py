@@ -20,8 +20,9 @@ import torch
 from sklearn.cluster import SpectralClustering
 import cc3d
 import optimization
+import cluster
 
-model_name = 'thin_cube.ply'
+model_name = 'planck_multisample_n2000_input.ply'
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Cluster WNF')
@@ -89,6 +90,7 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
     else:
         mask = np.ones(grid.shape[0],dtype=bool)
         # smask = np.ones(grid.shape[0],dtype=bool)
+    mask = mask.reshape(grid_shape)
     
     # 使用cc3d判断mask是否联通
     labels = cc3d.connected_components(mask.reshape(grid_shape))
@@ -106,73 +108,26 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
             wnf_calculator.update_normal(normals)
 
         wnf_field = torch.zeros(grid.shape[0],dtype=torch.float32,device=wnf_calculator.device)
-        wnf_field[mask] = wnf_calculator.query_wn(grid[mask])
+        wnf_field[mask.flatten()] = wnf_calculator.query_wn(grid[mask.flatten()])
         wnf_field.clamp_(-1,1)
 
-        wnf_field = np.reshape(wnf_field.cpu().numpy(), grid_shape)
-        segmented_grid = ncut.segment_winding_field(wnf_field, n_segments, compactness, mask=mask.reshape(grid_shape)).flatten()
-        
-        # segmented_grid = ncut.cc3d_segmentatino(wnf_field).flatten()
-        # segmented_grid[~mask] = -1
-        segmented_grid[mask],segment_mean = ncut.reallcate_labels_by_mean_val(segmented_grid[mask],wnf_field.flatten()[mask])
-        
-        # view.view_data_and_points(segmented_grid,normalized_points,bbox)
-        sp_idx = np.unique(segmented_grid[mask])
         points_count = ncut.get_point_counts_per_grid(normalized_points,grid_shape,bbox)
         points_count = np.reshape(points_count,grid_shape)
-        G,G_pointcount = ncut.compute_supervoxel_network(segmented_grid.reshape(grid_shape), wnf_field, points_count, mask=mask.reshape(grid_shape))
-        
-        A,B = optimization.getAB2(segment_mean)
-        has_edge = G != 0
-        A[~has_edge] = 0
-        B[~has_edge] = 0
-        A *= 1+G_pointcount
-        B /= 1+G_pointcount
-        
-        
-        x = optimization.MIQP(A,B,has_edge)
-        if iteration == 0:
-            gt_cluster = x
-                
-        cluster_grid = np.zeros_like(segmented_grid)
-        cluster_grid[~mask] = -1
-        for j in range(len(x)):
-            if x[j] == 0:
-                continue
-            cluster_grid[segmented_grid == sp_idx[j]] = x[j]
-        cluster_grid = np.reshape(cluster_grid,grid_shape)
-        segmented_grid = np.reshape(segmented_grid,grid_shape)
-        
-        # # 谱聚类
-        # assert ncut.is_connected(G), "G is not connected"
-        # fsegments = segmented_grid[mask]
-        # mgrid = grid[mask]
-        # pos = np.array([np.mean(mgrid[fsegments==i],axis=0) for i in range(len(G))])
-        # # G,nid2oid = ncut.get_subgraph(G,sp_idx)
-        # spectral = SpectralClustering(n_clusters=2, affinity='precomputed', assign_labels='kmeans', random_state=0) 
-        # sp_G = G.copy()
-        # sp_G[G_pointcount!=0] = G[G_pointcount!=0] * (G_pointcount[G_pointcount!=0])
-        # sp_G = tools.Gaussian(sp_G,sigma=1)
-        
-        # assert ncut.is_connected(sp_G), "sp_G is not connected"
-        # o3dmesh = ncut.weighted_graph_2_mesh(sp_G,pos,vis=False)
-        # o3d.io.write_triangle_mesh("temp/iter_{}_topology.ply".format(iteration), o3dmesh)
-        # clusters = spectral.fit_predict(sp_G)
-        # segmented_grid = np.reshape(segmented_grid,grid_shape)
-        # cluster_grid = np.zeros_like(segmented_grid)
-        # cluster_grid[~mask.reshape(grid_shape)] = -1
-        # for j in range(len(clusters)):
-        #     cluster_grid[segmented_grid == sp_idx[j]] = clusters[j]
-        # view.view_data_and_mesh(cluster_grid,gt_verts,gt_faces,bbox)
-        # G1,_ = ncut.get_subgraph(sp_G,sp_idx[clusters==1])
-        # o3dmesh = ncut.vis_weighted_graph(G1,pos[clusters==1])
-        # o3d.io.write_triangle_mesh("temp/iter_{}_topology_1.ply".format(iteration), o3dmesh)
-        # G2,_ = ncut.get_subgraph(sp_G,sp_idx[clusters==0])
-        # o3dmesh = ncut.vis_weighted_graph(G2,pos[clusters==0])
-        # o3d.io.write_triangle_mesh("temp/iter_{}_topology_0.ply".format(iteration), o3dmesh)
-        
 
-        
+        wnf_field = np.reshape(wnf_field.cpu().numpy(), grid_shape)
+        # segmented_grid = ncut.segment_winding_field(wnf_field, n_segments, compactness, mask=mask.reshape(grid_shape)).flatten()        
+        segmented_grid = ncut.cc3d_segmentatino(wnf_field,level_count=n_segments,min_size=100)
+        segmented_grid = np.reshape(segmented_grid,grid_shape) 
+        segmented_grid[mask],segment_mean = ncut.reallcate_labels_by_mean_val(segmented_grid[mask],wnf_field[mask])
+        mask = mask.reshape(grid_shape)
+        cluster_grid = cluster.max_cut(segmented_grid,wnf_field,points_count,mask)
+        slice_idx = (args.resolution//2,args.resolution//2,args.resolution//2)
+        tools.plot_partition(cluster_grid,"temp/{}/iter_{}_clusters_maxcut.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
+        cluster_grid = cluster.morphological_subdivision_with_dilation_3d(cluster_grid,tools.get_kernel_correspond_to_connectivity(6),iterations=2)
+        tools.plot_partition(cluster_grid,"temp/{}/iter_{}_clusters_maxcut_morphological.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
+        cluster_grid[mask],cluster_mean = ncut.reallcate_labels_by_mean_val(cluster_grid[mask].flatten(),wnf_field[mask].flatten())
+        cluster_grid = cluster.max_cut(cluster_grid,wnf_field,points_count,mask)
+        tools.plot_partition(cluster_grid,"temp/{}/iter_{}_clusters_maxcut_morphological_maxcut.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
         
         # 提取面片
         # 
@@ -188,13 +143,6 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
         
         
         wnf_calculator.update_normal(normals)
-        if "/" in args.input:
-            model_name = args.input.split('/')[-1].split('.')[0]
-        elif "\\" in args.input:
-            model_name = args.input.split('\\')[-1].split('.')[0]
-        
-        if not os.path.exists(os.path.dirname("temp/{}/".format(model_name))):
-            tools.rmkdir("temp/{}/".format(model_name))
         
         save_op(normalized_points,normals,"temp/{}/iter_{}_normals.ply".format(model_name,iteration))
         save_op_mesh(verts,faces,"temp/{}/iter_{}_mesh.ply".format(model_name,iteration))
@@ -218,4 +166,11 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
 if __name__ == "__main__":
     args = parse_args()
     print(args)
+    if "/" in args.input:
+        model_name = args.input.split('/')[-1].split('.')[0]
+    elif "\\" in args.input:
+        model_name = args.input.split('\\')[-1].split('.')[0]
+    
+    if not os.path.exists(os.path.dirname("temp/{}/".format(model_name))):
+        tools.rmkdir("temp/{}/".format(model_name))
     wnf_field,segmented_grid,cluster_grid = main(args.input,args.output,args.resolution,args.compactness,args.k,args.epsilon,args.n_segments,args.iters,args.distance)
