@@ -53,6 +53,105 @@ def max_cut(labels,wnf_field,points_count,mask):
         res_labels[labels == sp_labels[i]] = x[i]
     return res_labels
     
+
+
+# class 
+class LabelsTreeNode:
+    def __init__(self,labels_set=None,l=None,r=None):
+        self.l = l
+        self.r = r
+        self.labels_set = set()
+        if labels_set!=None:
+            self.labels_set |= labels_set
+        if l!=None:
+            self.labels_set |= l.labels_set
+        if r!=None:
+            self.labels_set |= r.labels_set    
+        
+    
+class LabelsTree:
+    def __init__(self,G,G_pointcount):
+        self.G = G
+        self.G_pointcount = G_pointcount
+        self.w = self.G *(1 + self.G_pointcount)
+
+        self.nodes = [LabelsTreeNode({i}) for i in range(len(G))]
+            
+    def _merge_node(self,node1:LabelsTreeNode, node2:LabelsTreeNode):
+        labels_set = node1.labels_set | node2.labels_set
+        return LabelsTreeNode(labels_set,node1,node2)
+       
+    def _cal_weight(self,node1, node2):
+        idx = np.ix_(list(node1.labels_set),list(node2.labels_set))
+        w = self.w[idx]
+        has_edge = self.G[idx] > 0
+        w = w.sum() / has_edge.sum()
+        return w
+
+    
+    
+    
+    def _MST_merging(self):
+        '''
+        当len(nodes)>1时,对nodes进行一次MST合并
+        '''            
+        if len(self.nodes)<1:
+            return False
+        weight_graph = np.zeros((len(self.nodes),len(self.nodes)))
+        for i in range(len(self.nodes)):
+            for j in range(i+1,len(self.nodes)):
+                weight_graph[i][j] = self._cal_weight(self.nodes[i],self.nodes[j])
+                weight_graph[j][i] = weight_graph[i][j]
+        idxs = np.where(weight_graph>0)
+        edges = [(i,j,weight_graph[i][j]) for i,j in zip(idxs[0],idxs[1])]
+        edges = sorted(edges,key=lambda x:x[2])
+        
+        inside = np.zeros(len(self.nodes))
+        chose_edge = []
+        new_nodes = []
+        for e in edges:
+            if inside[e[0]] or inside[e[1]]:
+                continue
+            inside[e[0]]=1
+            inside[e[1]]=1
+            chose_edge.append(e)
+        for e in chose_edge:
+            new_nodes.append(self._merge_node(self.nodes[e[0]],self.nodes[e[1]]))
+        for i in range(len(inside)):
+            if inside[i] == 0:
+                new_nodes.append(self.nodes[i])
+        self.nodes = new_nodes
+        # return True
+    
+    def MST_merging(self):
+        while self._MST_merging():
+            pass
+
+            
+        
+    
+    
+    
+    
+
+        
+        
+def tree_cut(labels,wnf_field,points_count,mask):
+    sp_labels = np.unique(labels[mask])
+    G,G_pointcount = ncut.compute_supervoxel_network(labels,wnf_field,points_count,mask);
+    t = LabelsTree(G,G_pointcount) 
+    t.MST_merging()
+    root = t.nodes[0]
+    l = root.l
+    r = root.r
+    new_labels = labels.copy()
+    for i in range(len(t.nodes)):
+        for ori_l in t.nodes[i].labels_set:
+            assert(ori_l in sp_labels)
+            new_labels[labels == ori_l] = i        
+    return new_labels 
+            
+
     
 # def reallocate_labels(labels,connectivity=26):
 #     '''

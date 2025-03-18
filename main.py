@@ -62,7 +62,7 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
     normalized_points, iXForm = tools.transform_points(ori_points)
     gt_normals = np.asarray(pcd.normals)
     if gt_normals.shape[0] == 0:
-        gt_normals = tools.pymeshlab_normal_estimate(normalized_points)
+        gt_normals = tools.pymeshlab_normal_estimate(normalized_points,10)
         print("no gt normals, use pymeshlab to estimate")
     normalized_points,gt_normals = tools.clean_bad_data(normalized_points,gt_normals)
     
@@ -98,6 +98,7 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
         print("mask is not connected, try to increase distance")
         exit()
 
+    slice_idx = (args.resolution//2,args.resolution//2,args.resolution//2)
     for iteration in range(iters):
         if iteration == 0:
             wnf_calculator.update_normal(gt_normals)
@@ -115,13 +116,15 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
         points_count = np.reshape(points_count,grid_shape)
 
         wnf_field = np.reshape(wnf_field.cpu().numpy(), grid_shape)
-        # segmented_grid = ncut.segment_winding_field(wnf_field, n_segments, compactness, mask=mask.reshape(grid_shape)).flatten()        
-        segmented_grid = ncut.cc3d_segmentatino(wnf_field,level_count=n_segments,min_size=100)
+        segmented_grid = ncut.segment_winding_field(wnf_field, n_segments, compactness, mask=mask.reshape(grid_shape)).flatten()        
+        # segmented_grid = ncut.cc3d_segmentatino(wnf_field,level_count=n_segments,min_size=100)
         segmented_grid = np.reshape(segmented_grid,grid_shape) 
         segmented_grid[mask],segment_mean = ncut.reallcate_labels_by_mean_val(segmented_grid[mask],wnf_field[mask])
         mask = mask.reshape(grid_shape)
+        
+        tree_cut_res = cluster.tree_cut(segmented_grid,wnf_field,points_count,mask)
+        
         cluster_grid = cluster.max_cut(segmented_grid,wnf_field,points_count,mask)
-        slice_idx = (args.resolution//2,args.resolution//2,args.resolution//2)
         tools.plot_partition(cluster_grid,"temp/{}/iter_{}_clusters_maxcut.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
         cluster_grid = cluster.morphological_subdivision_with_dilation_3d(cluster_grid,tools.get_kernel_correspond_to_connectivity(6),iterations=2)
         tools.plot_partition(cluster_grid,"temp/{}/iter_{}_clusters_maxcut_morphological.png".format(model_name,iteration),slice_idx,bbox,normalized_points)

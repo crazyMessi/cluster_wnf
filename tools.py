@@ -294,7 +294,7 @@ def create_uniform_grid(resolution,bbox=np.array([[-1,1],[-1,1],[-1,1]])):
 #     return idx
 
 def create_mask_by_k(tomask,source_points,k):
-    mask = np.zeros(tomask.shape[0],dtype=np.bool)
+    mask = np.zeros(tomask.shape[0],dtype=np.bool_)
     kdtree = cKDTree(tomask)
     _,idx = kdtree.query(source_points,k=k,workers=-1)
     idx = idx.flatten()

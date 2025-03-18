@@ -1,6 +1,4 @@
 # 使用igl计算WNF
-import igl
-from igl.copyleft.cgal import fast_winding_number
 import numpy as np
 import open3d as o3d
 import torch
@@ -322,6 +320,7 @@ class WNF:
         """
         使用 igl 计算 winding number
         """
+        from igl.copyleft.cgal import fast_winding_number
         return fast_winding_number(self.points.cpu().numpy(), self.normals.cpu().numpy(), query_points)
 
 

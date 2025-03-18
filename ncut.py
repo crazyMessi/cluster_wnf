@@ -9,7 +9,6 @@
 
 import numpy as np
 import open3d as o3d
-from igl.copyleft.cgal import fast_winding_number
 from skimage.segmentation import slic
 from sklearn.cluster import SpectralClustering
 import networkx as nx
@@ -170,6 +169,7 @@ def compute_supervoxel_network(segmented_grid, wn_field,points_count, mask: np.n
       wn_field: 原始的 winding number 场（3D numpy 数组）
     返回:
       G: 超体素网络邻接矩阵，形状为 [K, K]，K 为超体素数量
+      G_pointcount 邻接面上点的数量
     """
     if mask is None:
         mask = np.ones_like(segmented_grid,dtype=np.bool)
