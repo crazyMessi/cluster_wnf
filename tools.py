@@ -19,7 +19,8 @@ def transform_points(points):
     Scale = np.eye(4)
     XForm = np.eye(4)
     center = np.mean(points, axis=0)
-    scale = np.max(points, axis=0) - np.min(points, axis=0)
+    t = np.max(points, axis=0) - np.min(points, axis=0)
+    scale = np.array([t.max(),t.max(),t.max()])
     Move[:3,3] = -center
     Scale[[0,1,2], [0,1,2]] = 0.9/scale
     XForm = Scale @ Move
@@ -82,6 +83,7 @@ def plot_partition(partition_grid, save_path="./temp/partition.png",slice_idx=No
       partition_grid: 二分结果网格
     """
     import matplotlib.pyplot as plt
+    rmkdir("/".join(save_path.split("/")[0:-1]))
     
     # 创建图形
     fig = plt.figure(figsize=(15, 5))

@@ -159,8 +159,6 @@ def get_point_counts_per_grid(points,shapes,bbox):
     counts = np.bincount(idx,minlength=len(grid))
     return counts
     
-    
-
 def compute_supervoxel_network(segmented_grid, wn_field,points_count, mask: np.ndarray = None):
     """
     构造超体素网络的邻接矩阵

@@ -3,7 +3,8 @@ from skimage import morphology
 import cc3d
 import optimization
 import ncut
-
+from itertools import product
+import networkx as nx
 
     # # 谱聚类
     # assert ncut.is_connected(G), "G is not connected"
@@ -34,6 +35,7 @@ import ncut
     # o3d.io.write_triangle_mesh("temp/iter_{}_topology_0.ply".format(iteration), o3dmesh)
     
 
+
 def max_cut(labels,wnf_field,points_count,mask):
     sp_labels = np.unique(labels[mask])
     G,G_pointcount = ncut.compute_supervoxel_network(labels,wnf_field,points_count,mask=mask)
@@ -52,7 +54,6 @@ def max_cut(labels,wnf_field,points_count,mask):
             continue
         res_labels[labels == sp_labels[i]] = x[i]
     return res_labels
-    
 
 
 # class 
@@ -67,14 +68,11 @@ class LabelsTreeNode:
             self.labels_set |= l.labels_set
         if r!=None:
             self.labels_set |= r.labels_set    
-        
-    
+          
 class LabelsTree:
     def __init__(self,G,G_pointcount):
         self.G = G
         self.G_pointcount = G_pointcount
-        self.w = self.G *(1 + self.G_pointcount)
-
         self.nodes = [LabelsTreeNode({i}) for i in range(len(G))]
             
     def _merge_node(self,node1:LabelsTreeNode, node2:LabelsTreeNode):
@@ -82,30 +80,63 @@ class LabelsTree:
         return LabelsTreeNode(labels_set,node1,node2)
        
     def _cal_weight(self,node1, node2):
-        idx = np.ix_(list(node1.labels_set),list(node2.labels_set))
-        w = self.w[idx]
+        # idx = np.ix_(list(node1.labels_set),list(node2.labels_set))
+        t = list(product(list(node1.labels_set),list(node2.labels_set)))
+        idx = (np.array(t)[:,0],np.array(t)[:,1])
+        w = self.G_pointcount[idx]
         has_edge = self.G[idx] > 0
-        w = w.sum() / has_edge.sum()
+        if has_edge>0:
+            w = w.sum() / has_edge.sum()
+        else:
+            w = 1e9
         return w
 
-    
-    
-    
-    def _MST_merging(self):
-        '''
-        当len(nodes)>1时,对nodes进行一次MST合并
-        '''            
+
+    def _cal_node_weight_graph(self):
         if len(self.nodes)<1:
             return False
-        weight_graph = np.zeros((len(self.nodes),len(self.nodes)))
+        # weight_graph = np.zeros((len(self.nodes),len(self.nodes)))
+        weight_graph = np.eye(len(self.nodes)) * 1e9
         for i in range(len(self.nodes)):
             for j in range(i+1,len(self.nodes)):
                 weight_graph[i][j] = self._cal_weight(self.nodes[i],self.nodes[j])
                 weight_graph[j][i] = weight_graph[i][j]
+        return weight_graph
+        
+    
+    def GreedyMerging(self):
+        weight_graph = self._cal_node_weight_graph()
+        if weight_graph is False:
+            return False
+        idxs = np.where(weight_graph==0)
+        edges = [(i,j,weight_graph[i][j]) for i,j in zip(idxs[0],idxs[1])]
+        inside = np.zeros(len(self.nodes))
+        chose_edge = []
+        new_nodes = []
+        for e in edges:
+            if inside[e[0]] or inside[e[1]]:
+                continue
+            inside[e[0]]=1
+            inside[e[1]]=1
+            chose_edge.append(e)
+        for i in range(len(inside)):
+            if inside[i] == 0:
+                new_nodes.append(self.nodes[i])
+        for e in chose_edge:
+            new_nodes.append(self._merge_node(self.nodes[e[0]],self.nodes[e[1]]))       
+        self.nodes = new_nodes
+        return True
+
+    def _MST_merging(self):
+        '''
+        当len(nodes)>1时,对nodes进行一次MST合并
+        '''            
+        weight_graph = self._cal_node_weight_graph()
+        if weight_graph is False:
+            return False
         idxs = np.where(weight_graph>0)
         edges = [(i,j,weight_graph[i][j]) for i,j in zip(idxs[0],idxs[1])]
-        edges = sorted(edges,key=lambda x:x[2])
-        
+        edges = sorted(edges,key=lambda x:x[2])    
         inside = np.zeros(len(self.nodes))
         chose_edge = []
         new_nodes = []
@@ -126,24 +157,133 @@ class LabelsTree:
     def MST_merging(self):
         while self._MST_merging():
             pass
+   
+   
 
-            
+class SuperVoxelGraph:
+    def __init__(self,labels,wnf_field,points_count,mask=None):
+        self.labels = labels
+        self.wnf_field = wnf_field
+        self.points_count = points_count
+        self.mask = mask
+        if mask is None:
+            self.mask = np.ones_like(labels).astype(bool)
+        self.sp_labels = np.unique(labels[mask])
         
+        self.boundary_mask_s = np.zeros_like(labels).astype(int)
+        self.boundary_mask_e = np.zeros_like(labels).astype(int)
+        self.boundary_mask_e -=1 
+        self.boundary_mask_s -=1
+        self.G = None
+        self.G_pointcount = None
+        self.__compute_supervoxel_network()
+        
+        
+    def __compute_supervoxel_network(self):
+        if self.mask is None:
+            self.mask = np.ones_like(self.labels,dtype=np.bool)
+        sp_labels = np.unique(self.labels[self.mask])
+        K = len(sp_labels)
+        assert sp_labels.max() == K-1, "要求labels的标签从0开始连续排列"
+        G = np.zeros((K, K), dtype=np.float32)
+        G_pointcount = np.zeros((K, K), dtype=np.float32)
+        visited = np.zeros_like(G)
+        # 针对每个轴以及正负方向，统计不同超体素间的边权
+        for axis in range(3):
+            for shift in [1, -1]:
+                shifted_sp = np.roll(self.labels, shift, axis=axis)
+                shifted_wn = np.roll(self.wnf_field, shift, axis=axis)
+                shifted_mask = np.roll(self.mask, shift, axis=axis)
+
+                # 只有没被mask的部分 且shift后也没被mask的 且shift后sp不同的
+                tmask = (self.labels != shifted_sp) & shifted_mask & self.mask
+
+                if tmask.sum() == 0:
+                    print("Warning: No valid connections found between supervoxels in the current shift.")
+                    continue                
+
+                # 边界处理，避免错误连接
+                if shift == 1:
+                    if axis == 0:
+                        tmask[-1, :, :] = False
+                    elif axis == 1:
+                        tmask[:, -1, :] = False
+                    elif axis == 2:
+                        tmask[:, :, -1] = False
+                elif shift == -1:
+                    if axis == 0:
+                        tmask[0, :, :] = False
+                    elif axis == 1:
+                        tmask[:, 0, :] = False
+                    elif axis == 2:
+                        tmask[:, :, 0] = False
+                else:
+                    assert False, "shift 只能为 1 或 -1"
+
+                current_labels = self.labels[tmask]
+                neighbor_labels = shifted_sp[tmask]
+                current_point_count = self.points_count[tmask]
+                neighbor_point_count = self.points_count[tmask]
+                
+                assert current_labels.min() >= 0
+                assert neighbor_labels.min() >= 0
+                # 计算winding number的差值的绝对值
+                wn_diff = np.abs(self.wnf_field[tmask] - shifted_wn[tmask])
+
+                visited[current_labels, neighbor_labels] = 1
+                visited[neighbor_labels, current_labels] = 1
+                G[current_labels.flatten(), neighbor_labels.flatten()] += wn_diff.flatten()
+                G[neighbor_labels.flatten(), current_labels.flatten()] += wn_diff.flatten() # 保证对称性
+                G_pointcount[current_labels.flatten(), neighbor_labels.flatten()] += current_point_count.flatten()
+                G_pointcount[neighbor_labels.flatten(), current_labels.flatten()] += neighbor_point_count.flatten()
+                self.boundary_mask_e[tmask] = self.labels[tmask]
+                self.boundary_mask_s[tmask] = shifted_sp[tmask]
+                
+                
+                
+        G[visited==1] += 0.001 # 两个grid，尤其是存在clip操作的情况下，可能边界处边权为零
+        nG = nx.from_numpy_array(G)
+        components = list(nx.connected_components(nG))
+        assert len(components) == 1, "G 的联通分量数量不为 1"
+        
+        self.G = G
+        self.G_pointcount = G_pointcount
+
     
+def boundary_intergation(labels,wnf_field,points_count,mask=None):
+    from scipy.spatial import cKDTree 
+    SpGraph = SuperVoxelGraph(labels,wnf_field,points_count,mask)
+    boundary_idx = np.where(SpGraph.boundary_mask_s != -1)
+    boundary_idx = np.array(boundary_idx).T
     
+    boundary_tree = cKDTree(boundary_idx)
+    pts = np.where(points_count > 0)
+    pts = np.array(pts).T
+    nearest_idx = boundary_tree.query(pts, k=1)[1]
+    nearest_idx = boundary_idx[nearest_idx]
+    G = np.zeros_like(SpGraph.G)
+    # G[SpGraph.boundary_mask_e[nearest_idx[:,0],nearest_idx[:,1],nearest_idx[:,2]], SpGraph.boundary_mask_s[nearest_idx[:,0],nearest_idx[:,1],nearest_idx[:,2]]] += points_count[pts[:,0],pts[:,1],pts[:,2]]
+    np.add.at(G, (SpGraph.boundary_mask_e[nearest_idx[:,0],nearest_idx[:,1],nearest_idx[:,2]], SpGraph.boundary_mask_s[nearest_idx[:,0],nearest_idx[:,1],nearest_idx[:,2]]), points_count[pts[:,0],pts[:,1],pts[:,2]])
+    G = G + G.T
+    assert (G * np.eye(G.shape[0])).sum() == 0, "G 的对角线不为零"
+    tree = LabelsTree(SpGraph.G,G)
+    tree.GreedyMerging()
+    new_labels = labels.copy()
+    for i in range(len(tree.nodes)):
+        for ori_l in tree.nodes[i].labels_set:
+            assert(ori_l in SpGraph.sp_labels)
+            new_labels[labels == ori_l] = i
+    return new_labels
     
     
 
-        
-        
-def tree_cut(labels,wnf_field,points_count,mask):
+   
+def mergeing_cut(labels,wnf_field,points_count,mask):
     sp_labels = np.unique(labels[mask])
-    G,G_pointcount = ncut.compute_supervoxel_network(labels,wnf_field,points_count,mask);
+    G,G_pointcount = ncut.compute_supervoxel_network(labels,wnf_field,points_count,mask)
     t = LabelsTree(G,G_pointcount) 
-    t.MST_merging()
-    root = t.nodes[0]
-    l = root.l
-    r = root.r
+    t.GreedyMerging()
+    # root = t.nodes[0]
     new_labels = labels.copy()
     for i in range(len(t.nodes)):
         for ori_l in t.nodes[i].labels_set:

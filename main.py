@@ -22,7 +22,7 @@ import cc3d
 import optimization
 import cluster
 
-model_name = 'planck_multisample_n2000_input.ply'
+model_name = 'single_plane_wrong.ply'
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Cluster WNF')
@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument('--compactness', type=float, default=0.1, help='compactness of the grid')
     parser.add_argument('--k', type=int, default=10, help='k of the grid')
     parser.add_argument('--epsilon', type=float, default=1e-8, help='epsilon of the grid')
-    parser.add_argument('--n_segments', type=int, default=2000, help='n_segments of the grid')
+    parser.add_argument('--n_segments', type=int, default=500, help='n_segments of the grid')
     parser.add_argument('--iters', type=int, default=10, help='iters')
     parser.add_argument('--distance', type=float, default=0.03, help='size of the double cover')
     return parser.parse_args()
@@ -105,8 +105,9 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
             gt_cluster = None
         else:
             # normals = tools.PCA_normal_estimate(normalized_points)
-            normals = tools.pymeshlab_normal_estimate(normalized_points,k=10)
-            wnf_calculator.update_normal(normals)
+            # normals = tools.pymeshlab_normal_estimate(normalized_points,k=10)
+            # wnf_calculator.update_normal(normals)
+            pass
 
         wnf_field = torch.zeros(grid.shape[0],dtype=torch.float32,device=wnf_calculator.device)
         wnf_field[mask.flatten()] = wnf_calculator.query_wn(grid[mask.flatten()])
@@ -122,9 +123,13 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
         segmented_grid[mask],segment_mean = ncut.reallcate_labels_by_mean_val(segmented_grid[mask],wnf_field[mask])
         mask = mask.reshape(grid_shape)
         
-        tree_cut_res = cluster.tree_cut(segmented_grid,wnf_field,points_count,mask)
+        tree_cut_res = cluster.boundary_intergation(segmented_grid,wnf_field,points_count,mask)
+        for d in range(10):
+            tools.plot_partition(tree_cut_res,"temp/{}/tree/iter_{}_tree_{}.png".format(model_name,iteration,d),slice_idx,bbox,normalized_points)
+            tree_cut_res = cluster.boundary_intergation(tree_cut_res,wnf_field,points_count,mask)
+            tree_cut_res[mask],_ = ncut.reallcate_labels_by_mean_val(tree_cut_res[mask],wnf_field[mask])
         
-        cluster_grid = cluster.max_cut(segmented_grid,wnf_field,points_count,mask)
+        cluster_grid = cluster.max_cut(tree_cut_res,wnf_field,points_count,mask)
         tools.plot_partition(cluster_grid,"temp/{}/iter_{}_clusters_maxcut.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
         cluster_grid = cluster.morphological_subdivision_with_dilation_3d(cluster_grid,tools.get_kernel_correspond_to_connectivity(6),iterations=2)
         tools.plot_partition(cluster_grid,"temp/{}/iter_{}_clusters_maxcut_morphological.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
@@ -153,6 +158,7 @@ def main(input='./data/input/'+model_name,output='./data/output/'+model_name,res
         slice_idx = (args.resolution//2,args.resolution//2,args.resolution//2)
         tools.plot_partition(cluster_grid,"temp/{}/iter_{}_clusters.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
         tools.plot_partition(segmented_grid,"temp/{}/iter_{}_segments.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
+        tools.plot_partition(tree_cut_res,"temp/{}/iter_{}_tree.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
         tools.plot_partition(wnf_field,"temp/{}/iter_{}_wnf.png".format(model_name,iteration),slice_idx,bbox,normalized_points)
 
         # 保存wnf_field,segmented_grid,cluster_grid
